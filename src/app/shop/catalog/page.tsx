@@ -5,6 +5,7 @@ import { supabase, Product, Order } from '@/lib/supabase'
 import { getRetSession, clearRetSession, RetSession } from '@/lib/auth'
 
 type CartItem = { product: Product; qty: number }
+type Scheme = { id: string; name: string; description: string; tags: string; is_active: boolean }
 
 const spin = `@keyframes spin { to { transform: rotate(360deg); } }`
 
@@ -13,6 +14,7 @@ export default function RetailerApp() {
   const [session,  setSession]  = useState<RetSession | null>(null)
   const [products, setProducts] = useState<Product[]>([])
   const [orders,   setOrders]   = useState<Order[]>([])
+  const [schemes,  setSchemes]  = useState<Scheme[]>([])
   const [cart,     setCart]     = useState<CartItem[]>([])
   const [tab,      setTab]      = useState<'catalog' | 'cart' | 'orders' | 'account'>('catalog')
   const [search,   setSearch]   = useState('')
@@ -20,6 +22,7 @@ export default function RetailerApp() {
   const [loading,  setLoading]  = useState(true)
   const [placing,  setPlacing]  = useState(false)
   const [success,  setSuccess]  = useState(false)
+  const [showInvoice, setShowInvoice] = useState<Order | null>(null)
 
   useEffect(() => {
     const s = getRetSession()
@@ -27,11 +30,23 @@ export default function RetailerApp() {
     setSession(s)
     Promise.all([
       supabase.from('products').select('*').eq('distributor_id', s.distributorId).eq('is_active', true).order('category'),
-      supabase.from('orders').select('*, order_items(*, product:products(id,name,sku_code))').eq('retailer_id', s.retailerId).order('created_at', { ascending: false }).limit(20),
-    ]).then(([p, o]) => {
-      if (p.data) setProducts(p.data)
-      if (o.data) setOrders(o.data)
+      supabase.from('orders').select('*, order_items(*, product:products(id,name,sku_code,price))').eq('retailer_id', s.retailerId).order('created_at', { ascending: false }).limit(20),
+      supabase.from('schemes').select('*').eq('distributor_id', s.distributorId).eq('is_active', true),
+    ]).then(([p, o, sc]) => {
+      if (p.data)  setProducts(p.data)
+      if (o.data)  setOrders(o.data)
+      if (sc.data) setSchemes(sc.data)
       setLoading(false)
+    }).catch(() => {
+      // schemes table might not exist yet — still load products and orders
+      Promise.all([
+        supabase.from('products').select('*').eq('distributor_id', s.distributorId).eq('is_active', true).order('category'),
+        supabase.from('orders').select('*, order_items(*, product:products(id,name,sku_code,price))').eq('retailer_id', s.retailerId).order('created_at', { ascending: false }).limit(20),
+      ]).then(([p, o]) => {
+        if (p.data) setProducts(p.data)
+        if (o.data) setOrders(o.data)
+        setLoading(false)
+      })
     })
   }, [router])
 
@@ -62,9 +77,14 @@ export default function RetailerApp() {
       status: 'pending', order_source: 'app', total_amount: cartTotal,
     }).select().single()
     if (!error && ord) {
-      await supabase.from('order_items').insert(cart.map(x => ({ order_id: ord.id, product_id: x.product.id, quantity: x.qty, unit_price: x.product.price })))
+      await supabase.from('order_items').insert(cart.map(x => ({
+        order_id: ord.id, product_id: x.product.id, quantity: x.qty, unit_price: x.product.price
+      })))
       setCart([]); setSuccess(true); setTab('orders')
-      const { data } = await supabase.from('orders').select('*, order_items(*, product:products(id,name,sku_code))').eq('retailer_id', session.retailerId).order('created_at', { ascending: false }).limit(20)
+      const { data } = await supabase.from('orders')
+        .select('*, order_items(*, product:products(id,name,sku_code,price))')
+        .eq('retailer_id', session.retailerId)
+        .order('created_at', { ascending: false }).limit(20)
       if (data) setOrders(data)
       setTimeout(() => setSuccess(false), 5000)
     }
@@ -81,7 +101,16 @@ export default function RetailerApp() {
     if (nc.length > 0) { setCart(nc); setTab('cart') }
   }
 
-  const statusColor: Record<string, { bg: string; color: string; border: string; label: string }> = {
+  // Generate WhatsApp invoice text
+  const getInvoiceText = (order: Order) => {
+    const date = new Date(order.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    const items = (order.order_items || []).map(i =>
+      `  • ${i.product?.name} × ${i.quantity} = ₹${(i.line_total || i.quantity * i.unit_price).toLocaleString()}`
+    ).join('\n')
+    return `🧾 *INVOICE — OrderPe*\n━━━━━━━━━━━━━━\n📋 Order: ${order.id}\n📅 Date: ${date}\n\n*Items:*\n${items}\n━━━━━━━━━━━━━━\n💰 *Total: ₹${order.total_amount.toLocaleString()}*\n\n_${session?.distributorName}_`
+  }
+
+  const statusConfig: Record<string, { bg: string; color: string; border: string; label: string }> = {
     pending:    { bg: '#fffbeb', color: '#b45309', border: '#fde68a', label: '⏳ Pending confirm' },
     confirmed:  { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe', label: '✅ Confirmed' },
     dispatched: { bg: '#f5f3ff', color: '#7c3aed', border: '#ddd6fe', label: '🚚 Raaste mein' },
@@ -92,7 +121,7 @@ export default function RetailerApp() {
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', flexDirection: 'column', gap: 12 }}>
       <style>{spin}</style>
       <div style={{ width: 40, height: 40, border: '3px solid #ea580c', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-      <p style={{ color: '#78716c', fontSize: 14 }}>Catalog load ho raha hai...</p>
+      <p style={{ color: '#78716c', fontSize: 14, margin: 0 }}>Catalog load ho raha hai...</p>
     </div>
   )
 
@@ -102,13 +131,13 @@ export default function RetailerApp() {
 
       {/* TOPBAR */}
       <div style={{ background: 'white', borderBottom: '1px solid #f5f5f4', padding: '40px 16px 12px', position: 'sticky', top: 0, zIndex: 30, boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: tab === 'catalog' ? 10 : 0 }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
               <div style={{ width: 20, height: 20, background: '#ea580c', borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <span style={{ color: 'white', fontSize: 10, fontWeight: 900 }}>O</span>
               </div>
-              <span style={{ fontWeight: 900, fontSize: 14 }}>{session?.retailerName}</span>
+              <span style={{ fontWeight: 900, fontSize: 15 }}>{session?.retailerName}</span>
             </div>
             <p style={{ fontSize: 11, color: '#a8a29e', margin: 0 }}>{session?.distributorName}</p>
           </div>
@@ -121,12 +150,11 @@ export default function RetailerApp() {
         </div>
         {tab === 'catalog' && (
           <div style={{ position: 'relative' }}>
-            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#a8a29e' }}>🔍</span>
-            <input style={{ width: '100%', padding: '10px 12px 10px 36px', background: '#f5f5f4', border: '2px solid transparent', borderRadius: 12, fontSize: 14, outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit' }}
+            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#a8a29e', fontSize: 14 }}>🔍</span>
+            <input
+              style={{ width: '100%', padding: '10px 12px 10px 36px', background: '#f5f5f4', border: '2px solid transparent', borderRadius: 12, fontSize: 14, outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit', transition: 'border-color 0.15s' }}
               placeholder="Product ya SKU search karein..."
-              value={search} onChange={e => setSearch(e.target.value)}
-              onFocus={e => (e.target as HTMLInputElement).style.borderColor = '#ea580c'}
-              onBlur={e => (e.target as HTMLInputElement).style.borderColor = 'transparent'} />
+              value={search} onChange={e => setSearch(e.target.value)} />
           </div>
         )}
       </div>
@@ -134,37 +162,61 @@ export default function RetailerApp() {
       {/* CONTENT */}
       <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 90 }}>
 
-        {/* CATALOG */}
+        {/* ── CATALOG TAB ── */}
         {tab === 'catalog' && (
           <div>
-            <div style={{ display: 'flex', gap: 8, padding: '12px 16px', overflowX: 'auto' }}>
+            {/* CATEGORY PILLS */}
+            <div style={{ display: 'flex', gap: 8, padding: '12px 16px', overflowX: 'auto', msOverflowStyle: 'none' }}>
               {categories.map(cat => (
                 <button key={cat} onClick={() => setCategory(cat)}
-                  style={{ padding: '8px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap', border: '2px solid', cursor: 'pointer', transition: 'all 0.1s', flexShrink: 0, fontFamily: 'inherit',
+                  style={{ padding: '8px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap', border: '2px solid', cursor: 'pointer', flexShrink: 0, fontFamily: 'inherit', transition: 'all 0.1s',
                     background: category === cat ? '#ea580c' : 'white',
                     color: category === cat ? 'white' : '#57534e',
-                    borderColor: category === cat ? '#ea580c' : '#e7e5e4',
-                  }}>
+                    borderColor: category === cat ? '#ea580c' : '#e7e5e4' }}>
                   {cat}
                 </button>
               ))}
             </div>
 
+            {/* SCHEMES BANNER — loads from Supabase */}
+            {schemes.length > 0 && (
+              <div style={{ margin: '0 16px 12px', background: 'linear-gradient(135deg, #fffbeb, #fef3c7)', border: '1px solid #fde68a', borderRadius: 16, padding: 14 }}>
+                <p style={{ fontSize: 13, fontWeight: 900, color: '#92400e', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  🏷️ Aaj ke Special Offers
+                </p>
+                {schemes.map((s, i) => (
+                  <div key={s.id} style={{ background: 'white', borderRadius: 10, padding: '10px 12px', marginBottom: i < schemes.length - 1 ? 6 : 0, border: '1px solid #fde68a' }}>
+                    <p style={{ fontSize: 13, fontWeight: 700, color: '#1c1917', margin: '0 0 2px' }}>{s.name}</p>
+                    <p style={{ fontSize: 12, color: '#78716c', margin: '0 0 6px', lineHeight: 1.5 }}>{s.description}</p>
+                    {s.tags && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {s.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
+                          <span key={tag} style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#fff7ed', color: '#c2410c', border: '1px solid #fed7aa' }}>{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* REPEAT LAST ORDER */}
             {orders.length > 0 && cart.length === 0 && (
               <div style={{ margin: '0 16px 12px' }}>
                 <button onClick={repeatLast}
                   style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#ea580c', color: 'white', border: 'none', borderRadius: 16, padding: '14px 16px', fontWeight: 700, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit', boxShadow: '0 4px 12px rgba(234,88,12,0.3)' }}>
                   <span>🔁 Pichla Order Repeat Karein</span>
-                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>₹{orders[0]?.total_amount?.toLocaleString()}</span>
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>₹{orders[0]?.total_amount?.toLocaleString()} · {orders[0]?.order_items?.length} items</span>
                 </button>
               </div>
             )}
 
+            {/* PRODUCTS */}
             <div style={{ padding: '0 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
               {filtered.length === 0 ? (
                 <div style={{ padding: '48px 0', textAlign: 'center', color: '#a8a29e' }}>
                   <div style={{ fontSize: 40, opacity: 0.2, marginBottom: 8 }}>📦</div>
-                  <p>Koi product nahi mila</p>
+                  <p style={{ margin: 0 }}>Koi product nahi mila</p>
                 </div>
               ) : filtered.map(product => {
                 const qty = getQty(product.id)
@@ -201,14 +253,14 @@ export default function RetailerApp() {
           </div>
         )}
 
-        {/* CART */}
+        {/* ── CART TAB ── */}
         {tab === 'cart' && (
           <div style={{ padding: '20px 16px' }}>
             {success && (
               <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: 20, marginBottom: 16, textAlign: 'center' }}>
                 <p style={{ fontSize: 36, margin: '0 0 8px' }}>🎉</p>
                 <p style={{ fontWeight: 900, fontSize: 18, color: '#15803d', margin: '0 0 4px' }}>Order Place Ho Gaya!</p>
-                <p style={{ fontSize: 13, color: '#166534', margin: 0 }}>Distributor jaldi confirm karega</p>
+                <p style={{ fontSize: 13, color: '#166534', margin: 0 }}>Aapka distributor jaldi confirm karega</p>
               </div>
             )}
             {cart.length === 0 ? (
@@ -259,7 +311,7 @@ export default function RetailerApp() {
           </div>
         )}
 
-        {/* ORDERS */}
+        {/* ── ORDERS TAB ── */}
         {tab === 'orders' && (
           <div style={{ padding: '20px 16px' }}>
             <h2 style={{ fontWeight: 900, fontSize: 18, marginBottom: 16 }}>Aapke Orders</h2>
@@ -270,36 +322,50 @@ export default function RetailerApp() {
                 <button onClick={() => setTab('catalog')} style={{ background: '#ea580c', color: 'white', border: 'none', borderRadius: 14, padding: '12px 24px', fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>Pehla Order Karein</button>
               </div>
             ) : orders.map(order => {
-              const st = statusColor[order.status] || statusColor.pending
+              const st = statusConfig[order.status] || statusConfig.pending
               return (
                 <div key={order.id} style={{ background: 'white', borderRadius: 16, border: '1px solid #f5f5f4', padding: 16, marginBottom: 10, boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
                   <div style={{ display: 'flex', alignItems: 'start', justifyContent: 'space-between', marginBottom: 10 }}>
                     <div>
                       <p style={{ fontFamily: 'monospace', fontSize: 11, color: '#a8a29e', margin: '0 0 2px' }}>{order.id}</p>
-                      <p style={{ fontSize: 12, color: '#a8a29e', margin: 0 }}>{new Date(order.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</p>
+                      <p style={{ fontSize: 12, color: '#a8a29e', margin: 0 }}>{new Date(order.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
                     </div>
                     <span style={{ fontSize: 12, fontWeight: 700, padding: '4px 10px', borderRadius: 20, background: st.bg, color: st.color, border: `1px solid ${st.border}` }}>{st.label}</span>
                   </div>
-                  <div style={{ marginBottom: 10 }}>
-                    {order.order_items?.slice(0, 3).map((item, i) => (
-                      <p key={i} style={{ fontSize: 12, color: '#57534e', margin: '2px 0', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <span style={{ color: '#a8a29e' }}>•</span> {item.product?.name} × <strong>{item.quantity}</strong>
-                      </p>
+
+                  {/* ORDER ITEMS */}
+                  <div style={{ background: '#fafaf9', borderRadius: 10, padding: '10px 12px', marginBottom: 10, border: '1px solid #f5f5f4' }}>
+                    {order.order_items?.map((item, i) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '3px 0', borderBottom: i < (order.order_items?.length || 0) - 1 ? '1px dashed #f5f5f4' : 'none' }}>
+                        <span style={{ color: '#57534e' }}>{item.product?.name}</span>
+                        <span style={{ color: '#a8a29e' }}>×{item.quantity}</span>
+                        <span style={{ fontWeight: 700, color: '#1c1917' }}>₹{(item.line_total || item.quantity * item.unit_price).toLocaleString()}</span>
+                      </div>
                     ))}
-                    {(order.order_items?.length || 0) > 3 && <p style={{ fontSize: 11, color: '#a8a29e', margin: '2px 0' }}>+{(order.order_items?.length || 0) - 3} aur items</p>}
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid #f5f5f4', paddingTop: 10 }}>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid #f5f5f4', paddingTop: 10, gap: 8 }}>
                     <span style={{ fontWeight: 900, fontSize: 16, color: '#c2410c' }}>₹{order.total_amount.toLocaleString()}</span>
-                    <button onClick={() => {
-                      const items: CartItem[] = []
-                      order.order_items?.forEach(item => {
-                        const p = products.find(x => x.id === item.product_id)
-                        if (p) items.push({ product: p, qty: item.quantity })
-                      })
-                      if (items.length > 0) { setCart(items); setTab('cart') }
-                    }} style={{ fontSize: 12, fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '6px 12px', cursor: 'pointer', fontFamily: 'inherit' }}>
-                      🔁 Repeat
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {/* INVOICE BUTTON — always visible */}
+                      <button onClick={() => {
+                        const msg = getInvoiceText(order)
+                        window.open(`https://wa.me/91${session?.phone}?text=${encodeURIComponent(msg)}`, '_blank')
+                      }} style={{ fontSize: 11, fontWeight: 700, color: '#15803d', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit' }}>
+                        🧾 Invoice
+                      </button>
+                      {/* REORDER BUTTON */}
+                      <button onClick={() => {
+                        const items: CartItem[] = []
+                        order.order_items?.forEach(item => {
+                          const p = products.find(x => x.id === item.product_id)
+                          if (p) items.push({ product: p, qty: item.quantity })
+                        })
+                        if (items.length > 0) { setCart(items); setTab('cart') }
+                      }} style={{ fontSize: 11, fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit' }}>
+                        🔁 Repeat
+                      </button>
+                    </div>
                   </div>
                 </div>
               )
@@ -307,9 +373,10 @@ export default function RetailerApp() {
           </div>
         )}
 
-        {/* ACCOUNT */}
+        {/* ── ACCOUNT TAB ── */}
         {tab === 'account' && (
           <div style={{ padding: '20px 16px' }}>
+            {/* PROFILE */}
             <div style={{ background: 'white', borderRadius: 20, border: '1px solid #f5f5f4', padding: 20, marginBottom: 14 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
                 <div style={{ width: 52, height: 52, background: '#fff7ed', border: '2px solid #fed7aa', borderRadius: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 900, color: '#c2410c' }}>{session?.retailerName?.[0]}</div>
@@ -320,17 +387,13 @@ export default function RetailerApp() {
                 </div>
               </div>
               <div style={{ background: '#fafaf9', borderRadius: 12, padding: 12 }}>
-                <p style={{ fontSize: 10, fontWeight: 700, color: '#a8a29e', margin: '0 0 2px' }}>AAPKA DISTRIBUTOR</p>
+                <p style={{ fontSize: 10, fontWeight: 700, color: '#a8a29e', margin: '0 0 2px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Aapka Distributor</p>
                 <p style={{ fontWeight: 700, fontSize: 14, color: '#1c1917', margin: 0 }}>{session?.distributorName}</p>
               </div>
             </div>
 
-            {/* UDHAAR */}
-            <div style={{
-              borderRadius: 20, padding: 20, marginBottom: 14,
-              background: session && session.outstandingBalance > 0 ? '#fef2f2' : '#f0fdf4',
-              border: `1px solid ${session && session.outstandingBalance > 0 ? '#fecaca' : '#bbf7d0'}`,
-            }}>
+            {/* UDHAAR BALANCE */}
+            <div style={{ borderRadius: 20, padding: 20, marginBottom: 14, background: session && session.outstandingBalance > 0 ? '#fef2f2' : '#f0fdf4', border: `1px solid ${session && session.outstandingBalance > 0 ? '#fecaca' : '#bbf7d0'}` }}>
               <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 4px', color: session && session.outstandingBalance > 0 ? '#dc2626' : '#15803d' }}>Udhaar Balance</p>
               <p style={{ fontSize: 30, fontWeight: 900, margin: '0 0 4px', color: session && session.outstandingBalance > 0 ? '#dc2626' : '#15803d' }}>₹{session?.outstandingBalance?.toLocaleString() || 0}</p>
               <p style={{ fontSize: 13, margin: 0, color: session && session.outstandingBalance > 0 ? '#b91c1c' : '#166534' }}>
@@ -338,9 +401,29 @@ export default function RetailerApp() {
               </p>
             </div>
 
-            {/* STATS */}
+            {/* ACTIVE SCHEMES */}
+            {schemes.length > 0 && (
+              <div style={{ background: 'white', borderRadius: 20, border: '1px solid #f5f5f4', padding: 20, marginBottom: 14 }}>
+                <p style={{ fontWeight: 900, fontSize: 15, margin: '0 0 14px', display: 'flex', alignItems: 'center', gap: 6 }}>🏷️ Active Schemes</p>
+                {schemes.map((s, i) => (
+                  <div key={s.id} style={{ borderBottom: i < schemes.length - 1 ? '1px solid #f5f5f4' : 'none', paddingBottom: i < schemes.length - 1 ? 12 : 0, marginBottom: i < schemes.length - 1 ? 12 : 0 }}>
+                    <p style={{ fontWeight: 700, fontSize: 14, margin: '0 0 4px' }}>{s.name}</p>
+                    <p style={{ fontSize: 13, color: '#78716c', margin: '0 0 6px', lineHeight: 1.5 }}>{s.description}</p>
+                    {s.tags && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {s.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
+                          <span key={tag} style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#fff7ed', color: '#c2410c', border: '1px solid #fed7aa' }}>{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* ORDER STATS */}
             <div style={{ background: 'white', borderRadius: 20, border: '1px solid #f5f5f4', padding: 20, marginBottom: 14 }}>
-              <p style={{ fontWeight: 700, fontSize: 14, margin: '0 0 14px' }}>📊 Aapki Summary</p>
+              <p style={{ fontWeight: 900, fontSize: 15, margin: '0 0 14px' }}>📊 Aapki Summary</p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 {[
                   { v: orders.length, l: 'Total Orders' },
@@ -365,7 +448,7 @@ export default function RetailerApp() {
       </div>
 
       {/* BOTTOM NAV */}
-      <div style={{ position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: '100%', maxWidth: 430, background: 'white', borderTop: '1px solid #e7e5e4', display: 'flex', zIndex: 40, boxShadow: '0 -4px 12px rgba(0,0,0,0.08)' }}>
+      <div style={{ position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: '100%', maxWidth: 430, background: 'white', borderTop: '2px solid #f5f5f4', display: 'flex', zIndex: 40, boxShadow: '0 -4px 12px rgba(0,0,0,0.08)' }}>
         {[
           { id: 'catalog', icon: '🏪', label: 'Catalog' },
           { id: 'cart',    icon: '🛒', label: 'Cart',   badge: cartCount },
@@ -374,11 +457,11 @@ export default function RetailerApp() {
         ].map(item => (
           <button key={item.id} onClick={() => setTab(item.id as typeof tab)}
             style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '10px 0', border: 'none', background: 'none', cursor: 'pointer', position: 'relative', fontFamily: 'inherit' }}>
-            <span style={{ fontSize: 20, lineHeight: 1 }}>{item.icon}</span>
-            <span style={{ fontSize: 10, fontWeight: 700, color: tab === item.id ? '#ea580c' : '#a8a29e', marginTop: 2 }}>{item.label}</span>
-            {tab === item.id && <div style={{ position: 'absolute', bottom: 0, width: 20, height: 2, background: '#ea580c', borderRadius: 2 }} />}
+            <span style={{ fontSize: 22, lineHeight: 1 }}>{item.icon}</span>
+            <span style={{ fontSize: 10, fontWeight: 700, color: tab === item.id ? '#ea580c' : '#a8a29e', marginTop: 3 }}>{item.label}</span>
+            {tab === item.id && <div style={{ position: 'absolute', bottom: 0, width: 24, height: 3, background: '#ea580c', borderRadius: 2 }} />}
             {item.badge && item.badge > 0 && (
-              <span style={{ position: 'absolute', top: 6, right: '20%', background: '#dc2626', color: 'white', fontSize: 9, fontWeight: 900, borderRadius: '50%', minWidth: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px', boxShadow: '0 1px 4px rgba(0,0,0,0.2)' }}>{item.badge}</span>
+              <span style={{ position: 'absolute', top: 6, right: '18%', background: '#dc2626', color: 'white', fontSize: 9, fontWeight: 900, borderRadius: '50%', minWidth: 17, height: 17, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{item.badge}</span>
             )}
           </button>
         ))}
