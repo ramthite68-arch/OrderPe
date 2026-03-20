@@ -101,13 +101,125 @@ export default function RetailerApp() {
     if (nc.length > 0) { setCart(nc); setTab('cart') }
   }
 
-  // Generate WhatsApp invoice text
-  const getInvoiceText = (order: Order) => {
+  // Generate and download PDF invoice
+  const downloadInvoicePDF = (order: Order) => {
+    const date = new Date(order.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    const itemRows = (order.order_items || []).map(i => `
+      <tr>
+        <td style="padding:10px 12px;border-bottom:1px solid #f5f5f4;font-size:14px;">${i.product?.name || '-'}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f5f5f4;font-size:14px;text-align:center;">${i.quantity}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f5f5f4;font-size:14px;text-align:right;">₹${i.unit_price.toLocaleString()}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f5f5f4;font-size:14px;text-align:right;font-weight:700;">₹${(i.line_total || i.quantity * i.unit_price).toLocaleString()}</td>
+      </tr>`).join('')
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <title>Invoice ${order.id}</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family: Arial, sans-serif; background:#fff; color:#1c1917; padding:40px; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:32px; padding-bottom:20px; border-bottom:2px solid #ea580c; }
+    .logo { font-size:28px; font-weight:900; color:#1c1917; }
+    .logo span { color:#ea580c; }
+    .logo-sub { font-size:12px; color:#78716c; margin-top:4px; }
+    .invoice-info { text-align:right; }
+    .invoice-info h2 { font-size:22px; font-weight:900; color:#ea580c; margin-bottom:6px; }
+    .invoice-info p { font-size:13px; color:#78716c; margin-bottom:2px; }
+    .parties { display:flex; justify-content:space-between; margin-bottom:28px; gap:20px; }
+    .party { background:#fafaf9; border-radius:12px; padding:16px; flex:1; border:1px solid #f5f5f4; }
+    .party-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:#a8a29e; margin-bottom:6px; }
+    .party-name { font-size:15px; font-weight:700; color:#1c1917; margin-bottom:2px; }
+    .party-detail { font-size:12px; color:#78716c; }
+    table { width:100%; border-collapse:collapse; margin-bottom:0; }
+    thead tr { background:#1c1917; }
+    thead th { padding:12px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:white; text-align:left; }
+    thead th:nth-child(2) { text-align:center; }
+    thead th:nth-child(3), thead th:nth-child(4) { text-align:right; }
+    .total-row { background:#fff7ed; }
+    .total-row td { padding:14px 12px; font-size:16px; font-weight:900; color:#c2410c; }
+    .footer { margin-top:32px; padding-top:20px; border-top:1px solid #f5f5f4; display:flex; justify-content:space-between; align-items:center; }
+    .footer-brand { font-size:13px; color:#a8a29e; }
+    .footer-brand strong { color:#ea580c; }
+    .status-badge { display:inline-block; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:700; background:#f0fdf4; color:#15803d; border:1px solid #bbf7d0; }
+    @media print {
+      body { padding:20px; }
+      @page { margin:10mm; size:A4; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="logo">Order<span>Pe</span></div>
+      <div class="logo-sub">B2B Ordering Platform</div>
+    </div>
+    <div class="invoice-info">
+      <h2>INVOICE</h2>
+      <p><strong>Order ID:</strong> ${order.id}</p>
+      <p><strong>Date:</strong> ${date}</p>
+      <p><strong>Status:</strong> <span class="status-badge">${order.status.toUpperCase()}</span></p>
+    </div>
+  </div>
+
+  <div class="parties">
+    <div class="party">
+      <div class="party-label">From (Distributor)</div>
+      <div class="party-name">${session?.distributorName || 'Distributor'}</div>
+    </div>
+    <div class="party">
+      <div class="party-label">To (Retailer)</div>
+      <div class="party-name">${session?.retailerName || 'Retailer'}</div>
+      <div class="party-detail">${session?.ownerName || ''}</div>
+      <div class="party-detail">${session?.area || ''} · ${session?.phone || ''}</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Product</th>
+        <th>Qty</th>
+        <th>Rate</th>
+        <th>Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${itemRows}
+      <tr class="total-row">
+        <td colspan="3" style="padding:14px 12px;font-size:15px;font-weight:700;color:#1c1917;">Total Amount</td>
+        <td style="padding:14px 12px;font-size:18px;font-weight:900;color:#c2410c;text-align:right;">₹${order.total_amount.toLocaleString()}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="footer">
+    <div class="footer-brand">Powered by <strong>OrderPe</strong> — Digital B2B Ordering</div>
+    <div style="font-size:12px;color:#a8a29e;">Thank you for your business! 🙏</div>
+  </div>
+</body>
+</html>`
+
+    // Open in new window and trigger print (saves as PDF)
+    const win = window.open('', '_blank')
+    if (win) {
+      win.document.write(html)
+      win.document.close()
+      setTimeout(() => {
+        win.print()
+      }, 500)
+    }
+  }
+
+  // Share invoice via WhatsApp
+  const shareInvoiceWhatsApp = (order: Order) => {
     const date = new Date(order.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
     const items = (order.order_items || []).map(i =>
       `  • ${i.product?.name} × ${i.quantity} = ₹${(i.line_total || i.quantity * i.unit_price).toLocaleString()}`
     ).join('\n')
-    return `🧾 *INVOICE — OrderPe*\n━━━━━━━━━━━━━━\n📋 Order: ${order.id}\n📅 Date: ${date}\n\n*Items:*\n${items}\n━━━━━━━━━━━━━━\n💰 *Total: ₹${order.total_amount.toLocaleString()}*\n\n_${session?.distributorName}_`
+    const msg = `🧾 *INVOICE — OrderPe*\n━━━━━━━━━━━━━━\n📋 Order: ${order.id}\n📅 Date: ${date}\n\n*Items:*\n${items}\n━━━━━━━━━━━━━━\n💰 *Total: ₹${order.total_amount.toLocaleString()}*\n\n_${session?.distributorName}_`
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
   }
 
   const statusConfig: Record<string, { bg: string; color: string; border: string; label: string }> = {
@@ -348,11 +460,13 @@ export default function RetailerApp() {
                     <span style={{ fontWeight: 900, fontSize: 16, color: '#c2410c' }}>₹{order.total_amount.toLocaleString()}</span>
                     <div style={{ display: 'flex', gap: 6 }}>
                       {/* INVOICE BUTTON — always visible */}
-                      <button onClick={() => {
-                        const msg = getInvoiceText(order)
-                        window.open(`https://wa.me/91${session?.phone}?text=${encodeURIComponent(msg)}`, '_blank')
-                      }} style={{ fontSize: 11, fontWeight: 700, color: '#15803d', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit' }}>
-                        🧾 Invoice
+                      <button onClick={() => downloadInvoicePDF(order)}
+                        style={{ fontSize: 11, fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        📄 PDF
+                      </button>
+                      <button onClick={() => shareInvoiceWhatsApp(order)}
+                        style={{ fontSize: 11, fontWeight: 700, color: '#15803d', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        💬 Share
                       </button>
                       {/* REORDER BUTTON */}
                       <button onClick={() => {
